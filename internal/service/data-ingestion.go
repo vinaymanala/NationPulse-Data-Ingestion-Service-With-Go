@@ -25,6 +25,21 @@ func NewDataIngestionSvc(configs *types.Configs) *DataIngestionSvc {
 	}
 }
 
+func (d *DataIngestionSvc) Initialize() {
+	log.Println("Cleaning up idle connections...")
+	_, err := d.configs.DB.Client.Exec(d.configs.Ctx, `
+		SELECT pg_terminate_backend(pid) 
+		FROM pg_stat_activity 
+		WHERE usename = 'postgres' 
+		  AND pid <> pg_backend_pid();
+	`)
+	if err != nil {
+		log.Printf("Warning: Could not kill idle connections: %v\n", err)
+	}
+	log.Println("Closed connections successfully..")
+	time.Sleep(1 * time.Second)
+}
+
 func (d *DataIngestionSvc) Serve() {
 	var wg sync.WaitGroup
 	now := time.Now()
@@ -42,11 +57,11 @@ func (d *DataIngestionSvc) Serve() {
 		fmt.Println("URL constructed", formattedUrl)
 
 		wg.Go(func() {
-			ETLDataFeed(formattedUrl, indicator)
+			ETLDataFeed(d.configs, formattedUrl, indicator)
 		})
 
-		wg.Wait()
 	}
+	wg.Wait()
 
 	log.Println("Time taken to finish the job: ", time.Since(now))
 

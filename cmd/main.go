@@ -34,6 +34,7 @@ func main() {
 	}
 
 	dataIngestionSvc := service.NewDataIngestionSvc(configs)
+	dataIngestionSvc.Initialize()
 	dataIngestionSvc.Serve()
 
 }
