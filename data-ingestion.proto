@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package dataIngestion;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/vinaymanala/nationpulse-data-ingsetion-svc/pb";
+
+// Service definition : DataIngestion Service
+service DataIngestion{
+	// Unary RPC - notifies the BFF layer upon process completes
+	rpc NotifyBFF(NotifyBFFRequest) returns ( stream NotifyBFFResponse);
+}
+
+message NotifyBFFRequest {}
+
+message NotifyBFFMessage {
+	string message = 1;
+	MessageType type = 2;
+	google.protobuf.Timestamp created_at = 3;
+	google.protobuf.Timestamp completed_at = 4;
+}
+
+message NotifyBFFResponse {
+	string message = 1;
+	MessageType type = 2;
+	google.protobuf.Timestamp created_at = 3;
+	google.protobuf.Timestamp completed_at = 4;
+}
+
+enum MessageType {
+  FAILED = 0;
+  SUCCESS = 1;  
+}

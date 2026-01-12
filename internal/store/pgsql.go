@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/vinaymanala/nationpulse-data-ingestion-svc/internal/config"
@@ -28,12 +30,24 @@ func NewPgClient(ctx context.Context, cfg config.Config) *PgClient {
 	connStr := "postgres://" + pgUser + ":" + pgPass + "@" + pgAddr + "/" + pgName + "?sslmode=disable"
 	fmt.Println(connStr)
 	pgOnce.Do(func() {
-		db, err := pgxpool.New(ctx, connStr)
+		config, err := pgxpool.ParseConfig(connStr)
+		if err != nil {
+			log.Fatalf("Unable to parse database URL: %v", err)
+		}
+		config.MaxConnIdleTime = 30 * time.Minute
+		config.MaxConnLifetime = 1 * time.Hour
+		config.HealthCheckPeriod = 1 * time.Minute
+		config.MinConns = 5
+		config.MaxConns = 25
+
+		pool, err := pgxpool.NewWithConfig(ctx, config)
 		if err != nil {
 			fmt.Printf("Error occured while connecting database: %s\n", err)
 			panic(err)
 		}
-		pgInstance = &PgClient{Client: db}
+		pgInstance = &PgClient{Client: pool}
+
+		// pgxpool.NewWithConfig(ctx)
 	})
 	fmt.Println("Connected to Postgres database successfully")
 	return pgInstance

@@ -3,9 +3,11 @@ package service
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,20 +19,21 @@ func ConstructOEDC_URL(url, indicatorCode, formerYear string) string {
 	return url + "/" + indicatorCode + "?" + "startPeriod=" + formerYear + "&format=csvfilewithlabels"
 }
 
-func ExtractData(url, indicator string) []byte {
+func ExtractData(url string, indicator string) ([]byte, error) {
 	log.Printf("Fetching %s data feed...\n", indicator)
 	resp, err := http.Get(url)
 	if err != nil {
-		log.Fatalf("Error occured: %s\n", err)
-		return nil
+		log.Printf("Error occured: %s\n", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 	log.Printf("%s Response: %s \n", indicator, resp.Status)
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatalf("Error occured %s\n", err)
+		log.Printf("Error occured %s\n", err)
+		return nil, err
 	}
-	return data
+	return data, nil
 }
 
 func GetNewTableHeaders(headers []string) []string {
@@ -88,18 +91,18 @@ func GetDataFeedTableHeaders(tableType string) []string {
 	return nil
 }
 
-func TransformData(data []byte, indicator string) [][]string {
+func TransformData(data []byte, indicator string) ([][]string, error) {
 	now := time.Now()
 	log.Println("Started processing data: ", now)
 	r := csv.NewReader(strings.NewReader(string(data)))
 	records, err := r.ReadAll()
 	if err != nil {
 		log.Println(err)
-		return nil
+		return nil, err
 	}
 	if len(records) == 0 {
 		log.Println("Empty records!")
-		return nil
+		return nil, err
 	}
 	headersStr := GetDataFeedTableHeaders(indicator)
 	// create a map of headers with key as headername and value as index
@@ -133,10 +136,10 @@ func TransformData(data []byte, indicator string) [][]string {
 	// fmt.Println(results[:5])
 	log.Println("Done Transforming data for: ", indicator)
 
-	return results
+	return results, nil
 }
 
-func ExecuteQueries(c *types.Configs, results [][]string, indicator string) {
+func ExecuteQueries(c *types.Configs, ctx context.Context, results [][]string, indicator string) error {
 	var insertTableSqlStatement string
 	var tableName string
 	var createTableSqlStatement string
@@ -167,22 +170,26 @@ func ExecuteQueries(c *types.Configs, results [][]string, indicator string) {
 		insertTableSqlStatement = GrowthPopulationTableInsertSqlStatement
 	}
 
+	dropCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	// Drop table if exists
 	dropTableSqlStatement := `DROP TABLE IF EXISTS ` + tableName + ` CASCADE`
 	log.Println("DROP Query:", dropTableSqlStatement)
-	d, err := c.DB.Client.Query(c.Ctx, dropTableSqlStatement)
+	d, err := c.DB.Client.Query(dropCtx, dropTableSqlStatement)
 	if err != nil {
 		log.Println("Drop table failed: ", err)
-		return
+		return err
 	}
 	d.Close()
 	log.Println("TABLE ", tableName, " dropped (if it existed)")
 
+	createCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	// Create a new table
-	e, err := c.DB.Client.Exec(c.Ctx, createTableSqlStatement, tableName)
+	e, err := c.DB.Client.Exec(createCtx, createTableSqlStatement, tableName)
 	if err != nil {
 		log.Println("Error create table: ", err)
-		return
+		return err
 	}
 	if e.RowsAffected() == 0 {
 		log.Println("Created table ", tableName, " successfully.")
@@ -192,7 +199,8 @@ func ExecuteQueries(c *types.Configs, results [][]string, indicator string) {
 	headersStr := GetDataFeedTableHeaders(indicator)
 	headers := GetNewTableHeaders(headersStr)
 	log.Println("Inserting data...")
-	const BATCH_SIZE = 1000
+
+	const BATCH_SIZE = 500
 	for i := 1; i < len(results); i += BATCH_SIZE {
 		end := i + BATCH_SIZE
 		if len(results) < end {
@@ -220,29 +228,76 @@ func ExecuteQueries(c *types.Configs, results [][]string, indicator string) {
 		}
 		// log.Printf("Queue completed with %d queries. Sending batch to insert into table...\n", batch.Len())
 		// Add timeout context
-		ctx, cancel := context.WithTimeout(c.Ctx, 30*time.Second)
-		defer cancel()
+		batchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := executeBatchWithRetry(batchCtx, c, batch)
+		cancel()
 
+		if err != nil {
+			log.Printf("Error executing batch: %v", err)
+			return err
+		}
+	}
+	log.Println("Insert table ", tableName, " done successfully.")
+	return nil
+}
+
+func executeBatchWithRetry(ctx context.Context, c *types.Configs, batch *pgx.Batch) error {
+	maxRetries := 3
+	backoff := time.Second
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
 		batchResults := c.DB.Client.SendBatch(ctx, batch)
-		defer batchResults.Close()
+
+		hasError := false
 		for i := 0; i < batch.Len(); i++ {
 			_, err := batchResults.Exec()
 			if err != nil {
-				log.Fatalf("Error executing batch query %d: %v\n", i, err)
+				log.Printf("Error executing batch query %d (attempt %d): %v", i, attempt+1, err)
+				hasError = true
+				break
 			}
 		}
 
 		if err := batchResults.Close(); err != nil {
 			log.Fatalf("Error closing batch results: %v\n", err)
 		}
+
+		if !hasError {
+			return nil
+		}
+
+		if attempt < maxRetries-1 {
+			log.Printf("Retrying batch execution in %v..", backoff)
+			time.Sleep(backoff)
+			backoff *= 2
+		}
 	}
-	log.Println("Insert table ", tableName, " done successfully.")
+	return errors.New("Batch execution failed after retries" + strconv.Itoa(maxRetries))
 }
-func LoadData(c *types.Configs, results [][]string, indicator string) {
-	ExecuteQueries(c, results, indicator)
+func LoadData(c *types.Configs, ctx context.Context, results [][]string, indicator string) error {
+	err := ExecuteQueries(c, ctx, results, indicator)
+	return err
 }
-func ETLDataFeed(c *types.Configs, url, indicator string) {
-	byteData := ExtractData(url, indicator)
-	results := TransformData(byteData, indicator)
-	LoadData(c, results, indicator)
+func ETLDataFeed(c *types.Configs, ctx context.Context, url, indicator string, errCh chan<- struct{}) {
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	byteData, err := ExtractData(url, indicator)
+	if err != nil {
+		errCh <- struct{}{}
+		return
+	}
+	results, err := TransformData(byteData, indicator)
+	if err != nil {
+		errCh <- struct{}{}
+		return
+	}
+	if err := LoadData(c, ctx, results, indicator); err != nil {
+		errCh <- struct{}{}
+		return
+	}
+	log.Printf("Process %s completed successfully\n", indicator)
 }
