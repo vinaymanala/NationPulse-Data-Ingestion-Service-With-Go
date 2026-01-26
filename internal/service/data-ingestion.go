@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -14,10 +15,11 @@ import (
 )
 
 var (
-	CURRENT_YEAR   = time.Now().Year()
-	FORMER_YEAR    = CURRENT_YEAR - 16
-	notifyMessage  *pb.NotifyBFFMessage
-	isJobProccesed int32
+	CURRENT_YEAR = time.Now().Year()
+	FORMER_YEAR  = CURRENT_YEAR - 16
+	mu           sync.Mutex
+	// notifyMessage  *pb.NotifyBFFMessage
+	// isJobProccesed int32
 )
 
 type DataIngestionSvc struct {
@@ -46,11 +48,14 @@ func (d *DataIngestionSvc) Initialize() {
 	time.Sleep(1 * time.Second)
 }
 
-func (d *DataIngestionSvc) Serve() {
+func (d *DataIngestionSvc) Serve() (*pb.NotifyBFFMessage, error) {
 	var wg sync.WaitGroup
 	errCh := make(chan struct{})
 	ctx, cancel := context.WithCancel(d.configs.Ctx)
 	defer cancel()
+
+	// closer any idle connections
+	d.Initialize()
 
 	now := time.Now()
 	indicators := map[string]string{
@@ -81,7 +86,7 @@ func (d *DataIngestionSvc) Serve() {
 			close(errCh)
 			cancel()
 			// isJobProccesed = 1
-			return
+			return nil, errors.New("Error occured while running the job.")
 		}
 	}
 
@@ -91,12 +96,13 @@ func (d *DataIngestionSvc) Serve() {
 		CreatedAt:   now,
 		CompletedAt: time.Now(),
 	}
-	d.SetNotifyMessage(nm)
+	message := d.SetNotifyMessage(nm)
 	// isJobProccesed = 1
 	log.Println("Time taken to finish the job: ", time.Since(now))
+	return message, nil
 }
 
-func (d *DataIngestionSvc) SetNotifyMessage(message *NotifyMessage) {
+func (d *DataIngestionSvc) SetNotifyMessage(message *NotifyMessage) *pb.NotifyBFFMessage {
 	insertSqlStatement := `INSERT INTO jobScheduleLogs(message, type, created_at, completed_at) VALUES ($1, $2, $3, $4)`
 	ctx, cancel := context.WithTimeout(d.configs.Ctx, 5*time.Second)
 	defer cancel()
@@ -105,7 +111,8 @@ func (d *DataIngestionSvc) SetNotifyMessage(message *NotifyMessage) {
 		log.Fatalf("Failed to update the log table: %v", err)
 	}
 
-	notifyMessage = &pb.NotifyBFFMessage{
+	// notifyMessage =
+	return &pb.NotifyBFFMessage{
 		Message:     message.Message,
 		Type:        pb.MessageType(message.Type),
 		CreatedAt:   timestamppb.New(message.CreatedAt),
@@ -116,15 +123,32 @@ func (d *DataIngestionSvc) SetNotifyMessage(message *NotifyMessage) {
 
 func (d *DataIngestionSvc) NotifyBFF(_ *pb.NotifyBFFRequest, stream pb.DataIngestion_NotifyBFFServer) error {
 
-	response := &pb.NotifyBFFResponse{
-		Message:     notifyMessage.Message,
-		Type:        notifyMessage.Type,
-		CreatedAt:   notifyMessage.CreatedAt,
-		CompletedAt: notifyMessage.CompletedAt,
+	mu.Lock()
+	// start the job
+	message, err := d.Serve()
+	if err != nil {
+		fmt.Println(err)
 	}
-	notifyMessage = &pb.NotifyBFFMessage{}
+	mu.Unlock()
+
+	// transform the stream response
+	response := &pb.NotifyBFFResponse{
+		Message:     message.Message,
+		Type:        message.Type,
+		CreatedAt:   message.CreatedAt,
+		CompletedAt: message.CompletedAt,
+	}
+	// notifyMessage = &pb.NotifyBFFMessage{}
 	if err := stream.Send(response); err != nil {
 		return err
+	}
+	fmt.Println("Message sent!=========>")
+	select {
+	case <-d.configs.Ctx.Done():
+		return d.configs.Ctx.Err()
+	case <-time.After(5 * time.Minute):
+		return fmt.Errorf("Process Timeout!")
+	default:
 	}
 	return nil
 }

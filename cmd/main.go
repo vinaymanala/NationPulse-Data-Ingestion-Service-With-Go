@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,6 +14,8 @@ import (
 	"github.com/vinaymanala/nationpulse-data-ingestion-svc/internal/service"
 	"github.com/vinaymanala/nationpulse-data-ingestion-svc/internal/store"
 	. "github.com/vinaymanala/nationpulse-data-ingestion-svc/internal/types"
+	"github.com/vinaymanala/nationpulse-data-ingestion-svc/pb"
+	"google.golang.org/grpc"
 )
 
 func main() {
@@ -26,7 +29,8 @@ func main() {
 	cfg := config.Load()
 
 	// r := gin.Default()
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	pg := *store.NewPgClient(ctx, cfg)
 
@@ -37,25 +41,24 @@ func main() {
 	}
 
 	dataIngestionSvc := service.NewDataIngestionSvc(configs)
-	dataIngestionSvc.Initialize()
-	dataIngestionSvc.Serve()
-	os.Exit(1)
+	// dataIngestionSvc.Serve()
+	// os.Exit(1)
 
 	// setup a grpc tcp listener no port 50051
-	// lis, err := net.Listen("tcp", ":50051")
-	// if err != nil {
-	// 	log.Fatalf("Failed to listen: %v", err)
-	// }
-	// grpcServer := grpc.NewServer()
-	// pb.RegisterDataIngestionServer(grpcServer, dataIngestionSvc)
+	lis, err := net.Listen("tcp", ":50051")
+	if err != nil {
+		log.Fatalf("Failed to listen: %v", err)
+	}
+	grpcServer := grpc.NewServer()
+	pb.RegisterDataIngestionServer(grpcServer, dataIngestionSvc)
 
 	// Run server in a goroutine to allow graceful shutdown
-	// go func() {
-	// 	log.Printf("Listening to %v", lis.Addr())
-	// 	if err := grpcServer.Serve(lis); err != nil {
-	// 		log.Fatalf("Failed to serve grpc: %v", err)
-	// 	}
-	// }()
+	go func() {
+		log.Printf("Listening to %v", lis.Addr())
+		if err := grpcServer.Serve(lis); err != nil {
+			log.Fatalf("Failed to serve grpc: %v", err)
+		}
+	}()
 
 	// Wait for interrupt signal for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -63,7 +66,7 @@ func main() {
 	<-sigChan
 
 	log.Println("Shutting down gRPC server...")
-	// grpcServer.Stop()
+	grpcServer.GracefulStop()
+	lis.Close()
 	log.Println("Server stopped")
-
 }
