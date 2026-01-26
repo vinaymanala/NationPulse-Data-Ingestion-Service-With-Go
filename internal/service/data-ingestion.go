@@ -68,7 +68,10 @@ func (d *DataIngestionSvc) Serve() (*pb.NotifyBFFMessage, error) {
 	}
 
 	for indicator, indicatorCode := range indicators {
-		formattedUrl := ConstructOEDC_URL(d.configs.Cfg.BASE_URL, indicatorCode, strconv.Itoa(FORMER_YEAR))
+		formattedUrl, err := ConstructOEDC_URL(d.configs.Cfg.BASE_URL, indicatorCode, strconv.Itoa(FORMER_YEAR))
+		if err != nil {
+			log.Fatalf("Error occured: %v", err)
+		}
 		fmt.Println("URL constructed", formattedUrl)
 		wg.Go(func() {
 			ETLDataFeed(d.configs, ctx, formattedUrl, indicator, errCh)

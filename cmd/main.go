@@ -34,13 +34,13 @@ func main() {
 
 	pg := *store.NewPgClient(ctx, cfg)
 
-	configs := &Configs{
+	Configs := &Configs{
 		Cfg: cfg,
 		Ctx: ctx,
 		DB:  &pg,
 	}
 
-	dataIngestionSvc := service.NewDataIngestionSvc(configs)
+	dataIngestionSvc := service.NewDataIngestionSvc(Configs)
 	// dataIngestionSvc.Serve()
 	// os.Exit(1)
 

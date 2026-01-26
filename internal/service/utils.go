@@ -15,11 +15,17 @@ import (
 	"github.com/vinaymanala/nationpulse-data-ingestion-svc/internal/types"
 )
 
-func ConstructOEDC_URL(url, indicatorCode, formerYear string) string {
-	return url + "/" + indicatorCode + "?" + "startPeriod=" + formerYear + "&format=csvfilewithlabels"
+func ConstructOEDC_URL(url, indicatorCode, formerYear string) (string, error) {
+	if url == "" || indicatorCode == "" || formerYear == "" {
+		return "", errors.New("Empty arguments")
+	}
+	return url + "/" + indicatorCode + "?" + "startPeriod=" + formerYear + "&format=csvfilewithlabels", nil
 }
 
 func ExtractData(url string, indicator string) ([]byte, error) {
+	if indicator == "" || url == "" {
+		return nil, errors.New("Empty fields")
+	}
 	log.Printf("Fetching %s data feed...\n", indicator)
 	resp, err := http.Get(url)
 	if err != nil {
@@ -92,6 +98,9 @@ func GetDataFeedTableHeaders(tableType string) []string {
 }
 
 func TransformData(data []byte, indicator string) ([][]string, error) {
+	if data == nil || indicator == "" {
+		return nil, errors.New("Empty arguments")
+	}
 	now := time.Now()
 	log.Println("Started processing data: ", now)
 	r := csv.NewReader(strings.NewReader(string(data)))
@@ -105,6 +114,9 @@ func TransformData(data []byte, indicator string) ([][]string, error) {
 		return nil, err
 	}
 	headersStr := GetDataFeedTableHeaders(indicator)
+	if headersStr == nil {
+		return nil, errors.New("Columns are empty")
+	}
 	// create a map of headers with key as headername and value as index
 	headers := records[0]
 	headerMap := make(map[string]int)
@@ -131,6 +143,9 @@ func TransformData(data []byte, indicator string) ([][]string, error) {
 	}
 	// change the record[0] with new headers
 	results[0] = GetNewTableHeaders(headersStr)
+	if results[0] == nil {
+		return nil, errors.New("Empty table header")
+	}
 
 	log.Println("Stopped processing: ", time.Since(now))
 	// fmt.Println(results[:5])
